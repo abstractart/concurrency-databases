@@ -22,7 +22,7 @@ docker compose ps                         # дождаться healthy
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-python run_all.py                         # сразу все 13 кейсов на обеих СУБД (26 прогонов)
+python run_all.py                         # сразу все 14 кейсов на обеих СУБД (28 прогонов)
 
 python3 cases/p0_lost_update.py --db pg   # или отдельный кейс
 python3 cases/p0_lost_update.py --db mysql
@@ -60,6 +60,7 @@ python3 cases/p0_lost_update.py --db mysql
 | `p4_deadlock` | Встречные переводы → deadlock (PG `40P01`, MySQL `1213`); фикс — порядок блокировок по id |
 | `p5_lock_timeout` | `lock_timeout` (PG `55P03`) / `innodb_lock_wait_timeout` (MySQL `1205`): не ждать вечно |
 | `p6_advisory` | `pg_advisory_lock` / `GET_LOCK`: мьютекс приложения вне строк таблицы |
+| `p7_crm_long_transaction` | **Анти-паттерн CRM**: транзакция открыта, пока пользователь «редактирует» → таймауты сохранений у конкурентов и исчерпание пула соединений |
 
 ### REPEATABLE READ
 
@@ -77,7 +78,9 @@ python3 cases/p0_lost_update.py --db mysql
 | `o2_updated_at` | Та же оптимистика через метку времени, без изменения схемы |
 | `o3_serializable_retry` | `SERIALIZABLE` + retry: PG (SSI, `40001`) vs MySQL (блокировки, конфликт как `1213`/`1205`) |
 
-Ручные SQL-версии: `sql/pg/<имя>.sql` и `sql/mysql/<имя>.sql`.
+Ручные SQL-версии: `sql/pg/<имя>.sql` и `sql/mysql/<имя>.sql`
+(у P7 SQL-версии нет: анти-паттерн живёт на уровне приложения — незакрытые
+транзакции и соединения между HTTP-запросами).
 
 ## Ключевые различия PostgreSQL и MySQL (InnoDB)
 
@@ -95,7 +98,7 @@ python3 cases/p0_lost_update.py --db mysql
 ## Подтверждённые результаты прогонов
 
 Зафиксировано 2026-11-01 на окружении из `docker-compose.yml`
-(PostgreSQL 16, MySQL 8.0) командой `python run_all.py` — **26/26 прогонов
+(PostgreSQL 16, MySQL 8.0) командой `python run_all.py` — **28/28 прогонов
 успешно**. Поведение (ошибки, коды, итоговые балансы) стабильно от запуска
 к запуску; тайминги зависят от машины.
 
@@ -108,6 +111,7 @@ python3 cases/p0_lost_update.py --db mysql
 | `p4_deadlock` | сценарий A: **`40P01`** (детект ~1 с), применён один перевод; сценарий B: оба прошли | A: **`1213`** (детект мгновенный); B: оба прошли; сумма 2000 сохраняется |
 | `p5_lock_timeout` | T2 прервался через 1.01 с с **`55P03`** (строка держалась 3 с) | через 1.00 с с **`1205`** |
 | `p6_advisory` | T2 вошёл в «критическую секцию» через 1.51 с; try-lock: ключ 42 занят, 43 свободен | то же через `GET_LOCK` |
+| `p7_crm_long_transaction` | M1 держал строку 6 с: M2 не сохранил вовсе — **`55P03`** после 2.0 с; M3 — со 2-й попытки; 4-й пользователь: «пул исчерпан» | M2/M3 — **`1205`** после 2.0–2.5 с; M3 — с 3-й попытки; пул исчерпан так же |
 | `r1_rr_snapshot` | оба чтения в RR-транзакции видят 1000, после COMMIT — 700 | одинаково |
 | `r2_rr_write_conflict` | T2 → **`40001`** на UPDATE, итог **900** (потери нет, нужен ретрай) | конфликт не обнаружен: обе «успешны», итог **800** (потеря) |
 | `r3_rr_relative_update` | T2 → всё равно **`40001`**, итог **900** | `UPDATE` делает current read: 1000 → 900 → **700** без ошибок |
